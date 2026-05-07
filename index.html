@@ -160,6 +160,13 @@
             background: #3a3a3c;
         }
 
+        .small-note {
+            margin-top: 12px;
+            color: #86868b;
+            font-size: 0.82rem;
+            line-height: 1.4;
+        }
+
         #game {
             position: relative;
             width: 100%;
@@ -237,10 +244,22 @@
             box-shadow: 0 2px 4px rgba(0,0,0,0.5);
         }
 
-        .score-box.black { color: var(--text); }
-        .score-box.white { color: var(--text); }
-        .score-box.black .dot { background: var(--black-st); border: 1px solid #333; }
-        .score-box.white .dot { background: var(--white-st); }
+        .score-box.black {
+            color: var(--text);
+        }
+
+        .score-box.white {
+            color: var(--text);
+        }
+
+        .score-box.black .dot {
+            background: var(--black-st);
+            border: 1px solid #333;
+        }
+
+        .score-box.white .dot {
+            background: var(--white-st);
+        }
 
         #seats {
             display: grid;
@@ -316,7 +335,7 @@
         #board-wrapper {
             position: relative;
             width: 96%;
-            max-width: min(420px, 55vh); 
+            max-width: min(420px, 55vh);
             aspect-ratio: 1/1;
             margin: 0 auto 16px auto;
         }
@@ -489,15 +508,16 @@
 <div id="login-view" class="view active">
     <div class="box">
         <h2>Quad-Othello</h2>
-        <p>プレイヤー名を入力してください</p>
+        <p>プレイヤー名を入力し、役割を選んでください</p>
         <input type="text" id="name-input" placeholder="名前 (10文字以内)" maxlength="10" autocomplete="off">
 
-        <div id="action-create" style="display: none;">
-            <button class="btn-primary" onclick="handleCreateRoom()">新しく部屋を作成</button>
+        <div id="role-actions">
+            <button class="btn-primary" onclick="handleBecomeHost()">ホストとして入る</button>
+            <button class="btn-secondary" onclick="handleJoinRoom()">参加者として入る</button>
         </div>
 
-        <div id="action-join" style="display: none;">
-            <button class="btn-primary" onclick="handleJoinRoom()">この部屋に参加</button>
+        <div class="small-note" id="room-note">
+            URLに含まれる r と key を使って同じ部屋に接続します。
         </div>
     </div>
 </div>
@@ -587,8 +607,8 @@
 
 <script>
 const urlParams = new URLSearchParams(window.location.search);
-let rId = urlParams.get('r');
-let rKey = urlParams.get('key');
+let rId = urlParams.get("r");
+let rKey = urlParams.get("key");
 
 let isHost = false;
 let topic = "";
@@ -596,15 +616,16 @@ let client = null;
 let mqttReady = false;
 let pendingPublishes = [];
 let latestSeq = 0;
+let mqttInitialized = false;
 
-let uid = localStorage.getItem('qr_uid');
+let uid = localStorage.getItem("qr_uid");
 if (!uid) {
     uid = Math.random().toString(36).slice(2) + Date.now().toString(36);
-    localStorage.setItem('qr_uid', uid);
+    localStorage.setItem("qr_uid", uid);
 }
 
-let myName = localStorage.getItem('qr_name') || "";
-document.getElementById('name-input').value = myName;
+let myName = localStorage.getItem("qr_name") || "";
+document.getElementById("name-input").value = myName;
 
 const S = 8;
 const seatNames = [
@@ -630,17 +651,17 @@ let lastMoveAt = [0, 0, 0, 0];
 let myCooldown = false;
 let localCooldownTimer = null;
 
-const bEl = document.getElementById('board');
-const mEl = document.getElementById('msg');
-const mdEl = document.getElementById('modal');
-const tEl = document.getElementById('toast');
-const badgeEl = document.getElementById('game-mode-badge');
+const bEl = document.getElementById("board");
+const mEl = document.getElementById("msg");
+const mdEl = document.getElementById("modal");
+const tEl = document.getElementById("toast");
+const badgeEl = document.getElementById("game-mode-badge");
 
 window.onload = () => {
-    if (rId && rKey) {
-        document.getElementById('action-join').style.display = 'block';
+    if (!rId || !rKey) {
+        document.getElementById("room-note").innerText = "URLに r と key がありません。正しい部屋URLを使ってください。";
     } else {
-        document.getElementById('action-create').style.display = 'block';
+        document.getElementById("room-note").innerText = `Room ID: ${rId}`;
     }
 };
 
@@ -656,11 +677,11 @@ function newMsgId() {
 }
 
 function switchView(viewId) {
-    document.querySelectorAll('.view').forEach(v => {
-        v.classList.remove('active');
+    document.querySelectorAll(".view").forEach(v => {
+        v.classList.remove("active");
     });
 
-    document.getElementById(viewId).classList.add('active');
+    document.getElementById(viewId).classList.add("active");
 }
 
 function safePublish(payload) {
@@ -688,41 +709,50 @@ function flushPendingPublishes() {
 }
 
 function initMQTT() {
-    client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+    if (mqttInitialized) return;
+    mqttInitialized = true;
+
+    client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", {
         clean: true,
         reconnectPeriod: 1000,
         connectTimeout: 5000
     });
 
-    client.on('connect', () => {
+    client.on("connect", () => {
         mqttReady = true;
         client.subscribe(topic);
         flushPendingPublishes();
 
-        if (!isHost) {
+        if (isHost) {
+            safePublish({
+                t: "host_claim",
+                hostId: uid,
+                hostName: myName
+            });
+
+            broadcastHostPreparing();
+        } else {
             safePublish({
                 t: "hello_req",
                 from: uid
             });
-        } else {
-            broadcastHostPreparing();
         }
     });
 
-    client.on('reconnect', () => {
+    client.on("reconnect", () => {
         mqttReady = false;
         mEl.innerText = "再接続中...";
     });
 
-    client.on('close', () => {
+    client.on("close", () => {
         mqttReady = false;
     });
 
-    client.on('error', () => {
+    client.on("error", () => {
         showToast("通信に問題があります");
     });
 
-    client.on('message', (_, msg) => {
+    client.on("message", (_, msg) => {
         let d;
 
         try {
@@ -746,6 +776,11 @@ function handleMessage(d) {
         return;
     }
 
+    if (d.t === "host_claim") {
+        handleHostClaim(d);
+        return;
+    }
+
     if (d.t === "host_preparing") {
         if (roomHostId && d.hostId !== roomHostId) return;
 
@@ -754,6 +789,16 @@ function handleMessage(d) {
 
         if (state === "init") {
             mEl.innerText = `${roomHostName} が設定中です...`;
+        }
+
+        if (isHost && roomHostId !== uid) {
+            isHost = false;
+            showToast(`${roomHostName} さんが既にホストです`);
+            switchView("game-view");
+            safePublish({
+                t: "hello_req",
+                from: uid
+            });
         }
 
         return;
@@ -809,6 +854,45 @@ function handleMessage(d) {
     }
 }
 
+function handleHostClaim(d) {
+    const claimedHostId = String(d.hostId || "");
+    const claimedHostName = cleanName(d.hostName) || "Host";
+
+    if (!claimedHostId) return;
+
+    if (!roomHostId) {
+        roomHostId = claimedHostId;
+        roomHostName = claimedHostName;
+
+        if (state === "init") {
+            mEl.innerText = `${roomHostName} が設定中です...`;
+        }
+
+        if (isHost && roomHostId !== uid) {
+            isHost = false;
+            showToast(`${roomHostName} さんが既にホストです`);
+            switchView("game-view");
+            safePublish({
+                t: "hello_req",
+                from: uid
+            });
+        }
+
+        return;
+    }
+
+    if (roomHostId !== claimedHostId) {
+        if (isHost && uid === roomHostId) {
+            broadcastHostPreparing();
+            broadcastSnapshot(null);
+        }
+
+        return;
+    }
+
+    roomHostName = claimedHostName;
+}
+
 function normalizeCdTime(v) {
     const n = parseInt(v, 10);
     const allowed = [3000, 5000, 7000, 10000];
@@ -818,60 +902,72 @@ function normalizeCdTime(v) {
     return 7000;
 }
 
-function handleCreateRoom() {
-    const v = cleanName(document.getElementById('name-input').value);
+function validateRoomUrl() {
+    if (!rId || !rKey) {
+        showToast("部屋URLが正しくありません");
+        return false;
+    }
+
+    return true;
+}
+
+function handleBecomeHost() {
+    const v = cleanName(document.getElementById("name-input").value);
 
     if (!v) {
         showToast("名前を入力してください");
         return;
     }
 
+    if (!validateRoomUrl()) return;
+
     myName = v;
-    localStorage.setItem('qr_name', myName);
-
-    rId = Math.random().toString(36).slice(2, 10);
-    rKey = (window.crypto && window.crypto.randomUUID)
-        ? crypto.randomUUID().split('-')[0]
-        : Math.random().toString(36).slice(2, 10);
-
-    window.history.replaceState(null, '', `?r=${rId}&key=${rKey}`);
+    localStorage.setItem("qr_name", myName);
 
     isHost = true;
     roomHostId = uid;
     roomHostName = myName;
     topic = `qr/oth/${rId}/${rKey}`;
 
-    sessionStorage.setItem(`host_${rId}`, "1");
-
     document.getElementById("setup-host-label").innerText = `${myName} さんがホストです`;
 
     initMQTT();
+
+    safePublish({
+        t: "host_claim",
+        hostId: uid,
+        hostName: myName
+    });
+
+    broadcastHostPreparing();
     switchView("setup-view");
 }
 
 function handleJoinRoom() {
-    const v = cleanName(document.getElementById('name-input').value);
+    const v = cleanName(document.getElementById("name-input").value);
 
     if (!v) {
         showToast("名前を入力してください");
         return;
     }
 
+    if (!validateRoomUrl()) return;
+
     myName = v;
-    localStorage.setItem('qr_name', myName);
+    localStorage.setItem("qr_name", myName);
 
-    if (!rId || !rKey) {
-        showToast("招待URLが正しくありません");
-        return;
-    }
-
-    isHost = sessionStorage.getItem(`host_${rId}`) === "1";
+    isHost = false;
     topic = `qr/oth/${rId}/${rKey}`;
 
     initMQTT();
     switchView("game-view");
 
     mEl.innerText = "部屋の状態を確認しています...";
+
+    safePublish({
+        t: "hello_req",
+        from: uid
+    });
 
     setTimeout(() => {
         if (state === "init") {
@@ -914,6 +1010,7 @@ function makeSnapshot(to) {
 
 function broadcastSnapshot(to) {
     if (!isHost) return;
+    if (roomHostId !== uid) return;
 
     safePublish(makeSnapshot(to));
 }
@@ -950,8 +1047,8 @@ function applySnapshot(d) {
 }
 
 function toggleCdSelect() {
-    const mode = document.getElementById('config-mode').value;
-    document.getElementById('config-cd').disabled = (mode === 'turn');
+    const mode = document.getElementById("config-mode").value;
+    document.getElementById("config-cd").disabled = (mode === "turn");
 }
 
 function submitConfig() {
@@ -960,8 +1057,8 @@ function submitConfig() {
         return;
     }
 
-    const mode = document.getElementById('config-mode').value;
-    const cdTime = parseInt(document.getElementById('config-cd').value, 10);
+    const mode = document.getElementById("config-mode").value;
+    const cdTime = parseInt(document.getElementById("config-cd").value, 10);
 
     safePublish({
         t: "config_set",
