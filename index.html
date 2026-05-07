@@ -352,6 +352,24 @@
             background: var(--accent-hover);
         }
 
+        #timer-bar-wrap {
+            width: 100%;
+            height: 8px;
+            border-radius: 999px;
+            background: #2c2c2e;
+            overflow: hidden;
+            margin-bottom: 12px;
+            border: 1px solid var(--border);
+            display: none;
+        }
+
+        #timer-bar-fill {
+            height: 100%;
+            width: 100%;
+            background: var(--danger);
+            transition: width 0.1s linear;
+        }
+
         #board-wrapper {
             position: relative;
             width: 96%;
@@ -655,6 +673,10 @@
             <button id="host-start-btn" onclick="hostStartCountdown()">ゲーム開始</button>
         </div>
 
+        <div id="timer-bar-wrap">
+            <div id="timer-bar-fill"></div>
+        </div>
+
         <div id="board-wrapper">
             <div id="board"></div>
 
@@ -696,6 +718,8 @@ let latestSeq = 0;
 let mqttInitialized = false;
 let hostFinalStartTimer = null;
 let countdownInterval = null;
+let inactivityTimer = null;
+let inactivityUiInterval = null;
 let hostCandidateNameById = {};
 
 let uid = localStorage.getItem("qr_uid");
@@ -709,6 +733,7 @@ document.getElementById("name-input").value = myName;
 
 const S = 8;
 const COUNTDOWN_MS = 3000;
+const INACTIVITY_MS = 13000;
 
 const seatNames = [
     "Team A(1) [黒]",
@@ -730,6 +755,8 @@ let board = [];
 let seats = [null, null, null, null];
 let turn = 0;
 let lastMoveAt = [0, 0, 0, 0];
+let lastAcceptedMoveAt = 0;
+let inactivityEndAt = 0;
 let countdownEndAt = 0;
 let hostProcessedMsgIds = new Set();
 let myCooldown = false;
@@ -739,6 +766,7 @@ let gameHistory = [];
 let gameStartedAt = null;
 let gameFinishedAt = null;
 let lastMoveNo = 0;
+let finishReason = "";
 
 const bEl = document.getElementById("board");
 const mEl = document.getElementById("msg");
@@ -748,6 +776,8 @@ const badgeEl = document.getElementById("game-mode-badge");
 const countdownOverlayEl = document.getElementById("countdown-overlay");
 const countdownNumberEl = document.getElementById("countdown-number");
 const countdownLabelEl = document.getElementById("countdown-label");
+const timerBarWrapEl = document.getElementById("timer-bar-wrap");
+const timerBarFillEl = document.getElementById("timer-bar-fill");
 
 window.onload = () => {
     if (!rId || !rKey) {
@@ -907,6 +937,8 @@ function handleMessage(d) {
         state = "waiting";
         turn = 0;
         lastMoveAt = [0, 0, 0, 0];
+        lastAcceptedMoveAt = 0;
+        inactivityEndAt = 0;
         countdownEndAt = 0;
 
         broadcastSnapshot(null);
@@ -1026,6 +1058,7 @@ function electHostId(a, b) {
 function resolveMyHostStatus() {
     if (isHost && roomHostId !== uid) {
         isHost = false;
+        clearHostInactivityTimer();
         showToast(`${roomHostName || "他のユーザー"} さんがホストです`);
         switchView("game-view");
         safePublish({
@@ -1155,11 +1188,14 @@ function makeSnapshot(to) {
         seats,
         turn,
         lastMoveAt,
+        lastAcceptedMoveAt,
+        inactivityEndAt,
         countdownEndAt,
         gameHistory,
         gameStartedAt,
         gameFinishedAt,
         lastMoveNo,
+        finishReason,
         serverTime: Date.now()
     };
 }
@@ -1191,11 +1227,14 @@ function applySnapshot(d) {
     seats = sanitizeSeats(d.seats);
     turn = Number.isInteger(d.turn) ? d.turn : 0;
     lastMoveAt = Array.isArray(d.lastMoveAt) ? d.lastMoveAt.slice(0, 4).map(x => Number(x) || 0) : [0, 0, 0, 0];
+    lastAcceptedMoveAt = typeof d.lastAcceptedMoveAt === "number" ? d.lastAcceptedMoveAt : 0;
+    inactivityEndAt = typeof d.inactivityEndAt === "number" ? d.inactivityEndAt : 0;
     countdownEndAt = typeof d.countdownEndAt === "number" ? d.countdownEndAt : 0;
     gameHistory = Array.isArray(d.gameHistory) ? d.gameHistory : [];
     gameStartedAt = typeof d.gameStartedAt === "number" ? d.gameStartedAt : null;
     gameFinishedAt = typeof d.gameFinishedAt === "number" ? d.gameFinishedAt : null;
     lastMoveNo = Number.isInteger(d.lastMoveNo) ? d.lastMoveNo : gameHistory.length;
+    finishReason = typeof d.finishReason === "string" ? d.finishReason : "";
 
     if (state === "waiting" || state === "countdown" || state === "playing" || state === "finished") {
         if (!bEl.children.length) {
@@ -1209,6 +1248,7 @@ function applySnapshot(d) {
         updateValidMoves();
         syncCooldownUI();
         updateCountdownUI();
+        updateInactivityUI();
     }
 }
 
@@ -1290,14 +1330,19 @@ function initGameState() {
     seats = [null, null, null, null];
     turn = 0;
     lastMoveAt = [0, 0, 0, 0];
+    lastAcceptedMoveAt = 0;
+    inactivityEndAt = 0;
     countdownEndAt = 0;
     gameHistory = [];
     gameStartedAt = null;
     gameFinishedAt = null;
     lastMoveNo = 0;
+    finishReason = "";
     myCooldown = false;
     mdEl.style.display = "none";
     hideCountdownOverlay();
+    clearHostInactivityTimer();
+    stopInactivityUI();
 }
 
 function initB() {
@@ -1351,10 +1396,14 @@ function hostHandleStartReq(d) {
     state = "countdown";
     countdownEndAt = Date.now() + COUNTDOWN_MS;
     lastMoveAt = [0, 0, 0, 0];
+    lastAcceptedMoveAt = 0;
+    inactivityEndAt = 0;
     gameStartedAt = countdownEndAt;
     gameFinishedAt = null;
     gameHistory = [];
     lastMoveNo = 0;
+    finishReason = "";
+    clearHostInactivityTimer();
 
     broadcastSnapshot(null);
     scheduleHostGameStart();
@@ -1377,7 +1426,11 @@ function scheduleHostGameStart() {
         turn = findFirstMovableTurn();
         countdownEndAt = 0;
         lastMoveAt = [0, 0, 0, 0];
+        lastAcceptedMoveAt = Date.now();
+        inactivityEndAt = lastAcceptedMoveAt + INACTIVITY_MS;
+        finishReason = "";
 
+        scheduleHostInactivityEnd();
         broadcastSnapshot(null);
     }, remain + 80);
 }
@@ -1694,11 +1747,21 @@ function hostHandleMoveReq(d) {
         white: counts.white
     });
 
+    lastAcceptedMoveAt = Date.now();
+    inactivityEndAt = lastAcceptedMoveAt + INACTIVITY_MS;
+
     if (config.mode === "turn") {
         turn = calculateNextTurn(actorIdx);
     }
 
     checkEndHost();
+
+    if (state === "playing") {
+        scheduleHostInactivityEnd();
+    } else {
+        clearHostInactivityTimer();
+    }
+
     broadcastSnapshot(null);
 }
 
@@ -1709,25 +1772,43 @@ function checkEndHost() {
     if (empty === 0 || !canAnySeatedPlayerMove()) {
         state = "finished";
         gameFinishedAt = Date.now();
+        finishReason = empty === 0
+            ? "盤面が埋まったため終了"
+            : "合法手が存在しないため終了";
+        clearHostInactivityTimer();
     }
 }
 
-function countStones() {
-    let black = 0;
-    let white = 0;
-    let empty = 0;
+function scheduleHostInactivityEnd() {
+    if (!isHost || roomHostId !== uid) return;
+    if (state !== "playing") return;
 
-    if (!Array.isArray(board)) {
-        return { black, white, empty: 64 };
+    clearHostInactivityTimer();
+
+    if (!inactivityEndAt) {
+        inactivityEndAt = Date.now() + INACTIVITY_MS;
     }
 
-    board.flat().forEach(v => {
-        if (v === 1) black++;
-        else if (v === 2) white++;
-        else empty++;
-    });
+    const remain = Math.max(0, inactivityEndAt - Date.now());
 
-    return { black, white, empty };
+    inactivityTimer = setTimeout(() => {
+        if (!isHost || roomHostId !== uid) return;
+        if (state !== "playing") return;
+
+        state = "finished";
+        gameFinishedAt = Date.now();
+        finishReason = "13秒間着手がなかったため終了";
+
+        clearHostInactivityTimer();
+        broadcastSnapshot(null);
+    }, remain + 50);
+}
+
+function clearHostInactivityTimer() {
+    if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = null;
+    }
 }
 
 function startLocalCooldown(idx, duration) {
@@ -1858,6 +1939,40 @@ function hideCountdownOverlay() {
     }
 }
 
+function updateInactivityUI() {
+    stopInactivityUI();
+
+    if (state !== "playing" || !inactivityEndAt) {
+        timerBarWrapEl.style.display = "none";
+        return;
+    }
+
+    timerBarWrapEl.style.display = "block";
+
+    const update = () => {
+        if (state !== "playing" || !inactivityEndAt) {
+            timerBarWrapEl.style.display = "none";
+            stopInactivityUI();
+            return;
+        }
+
+        const remain = Math.max(0, inactivityEndAt - hostNow());
+        const ratio = Math.max(0, Math.min(1, remain / INACTIVITY_MS));
+        timerBarFillEl.style.width = `${ratio * 100}%`;
+    };
+
+    update();
+
+    inactivityUiInterval = setInterval(update, 100);
+}
+
+function stopInactivityUI() {
+    if (inactivityUiInterval) {
+        clearInterval(inactivityUiInterval);
+        inactivityUiInterval = null;
+    }
+}
+
 function drawStone(r, c, col) {
     const cell = bEl.children[r * S + c];
     if (!cell) return;
@@ -1884,6 +1999,24 @@ function updateCount() {
 
     document.getElementById("score-b").innerText = counts.black;
     document.getElementById("score-w").innerText = counts.white;
+}
+
+function countStones() {
+    let black = 0;
+    let white = 0;
+    let empty = 0;
+
+    if (!Array.isArray(board)) {
+        return { black, white, empty: 64 };
+    }
+
+    board.flat().forEach(v => {
+        if (v === 1) black++;
+        else if (v === 2) white++;
+        else empty++;
+    });
+
+    return { black, white, empty };
 }
 
 function renderResultModalIfNeeded() {
@@ -1963,6 +2096,8 @@ function updateUI() {
     }
 
     if (state === "waiting") {
+        timerBarWrapEl.style.display = "none";
+
         const seatedCount = seats.filter(s => s !== null).length;
         const emptyCount = seats.filter(s => s === null).length;
 
@@ -1978,6 +2113,7 @@ function updateUI() {
 
         mEl.style.color = "var(--text)";
     } else if (state === "countdown") {
+        timerBarWrapEl.style.display = "none";
         mEl.innerText = "まもなく開始します";
         mEl.style.color = "var(--accent)";
     } else if (state === "playing") {
@@ -1992,11 +2128,12 @@ function updateUI() {
                 ? "var(--accent)"
                 : "#86868b";
         } else {
-            mEl.innerText = "対戦中";
+            mEl.innerText = "13秒以内に誰かが打たないと終了します";
             mEl.style.color = "var(--text)";
         }
     } else if (state === "finished") {
-        mEl.innerText = "ゲーム終了";
+        timerBarWrapEl.style.display = "none";
+        mEl.innerText = finishReason || "ゲーム終了";
         mEl.style.color = "#86868b";
     }
 
@@ -2034,11 +2171,16 @@ function hostHandleResetReq(d) {
     state = "waiting";
     turn = 0;
     lastMoveAt = [0, 0, 0, 0];
+    lastAcceptedMoveAt = 0;
+    inactivityEndAt = 0;
     countdownEndAt = 0;
     gameHistory = [];
     gameStartedAt = null;
     gameFinishedAt = null;
     lastMoveNo = 0;
+    finishReason = "";
+
+    clearHostInactivityTimer();
 
     broadcastSnapshot(null);
 }
@@ -2117,6 +2259,7 @@ function makeKifuText() {
     lines.push(`Room ID: ${rId || "-"}`);
     lines.push(`Mode: ${config.mode === "turn" ? "ターン制" : "リアルタイム"}`);
     lines.push(`Cooldown: ${config.mode === "realtime" ? String(config.cdTime / 1000) + "秒" : "-"}`);
+    lines.push(`Inactivity Limit: ${INACTIVITY_MS / 1000}秒`);
     lines.push(`Host: ${roomHostName || "-"}`);
     lines.push(`Started: ${formatTime(gameStartedAt)}`);
     lines.push(`Finished: ${formatTime(gameFinishedAt)}`);
@@ -2133,6 +2276,7 @@ function makeKifuText() {
     lines.push("Result");
     lines.push("--------------------");
     lines.push(`${result}`);
+    lines.push(`End reason: ${finishReason || "-"}`);
     lines.push(`黒: ${counts.black}`);
     lines.push(`白: ${counts.white}`);
     lines.push("");
