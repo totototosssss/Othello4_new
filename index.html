@@ -509,17 +509,33 @@
         #result-score {
             font-size: 1.2rem;
             color: #d1d1d6;
-            margin-bottom: 32px;
+            margin-bottom: 22px;
             font-weight: 600;
         }
 
-        #modal button {
-            padding: 14px 36px;
-            background: var(--text);
-            color: var(--bg);
-            font-size: 1.1rem;
+        .modal-actions {
+            width: min(260px, 90%);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .modal-actions button {
+            width: 100%;
+            padding: 14px 22px;
+            font-size: 1rem;
             border-radius: 24px;
             font-weight: 700;
+        }
+
+        #btn-copy-kifu {
+            background: var(--accent);
+            color: white;
+        }
+
+        #btn-reset {
+            background: var(--text);
+            color: var(--bg);
         }
 
         #countdown-overlay {
@@ -650,7 +666,11 @@
             <div id="modal">
                 <h2 id="result-text"></h2>
                 <p id="result-score"></p>
-                <button onclick="sendReset()" id="btn-reset">もう一度遊ぶ</button>
+
+                <div class="modal-actions">
+                    <button onclick="copyKifu()" id="btn-copy-kifu">棋譜をコピー</button>
+                    <button onclick="sendReset()" id="btn-reset">もう一度遊ぶ</button>
+                </div>
             </div>
         </div>
 
@@ -715,6 +735,10 @@ let hostProcessedMsgIds = new Set();
 let myCooldown = false;
 let localCooldownTimer = null;
 let timeOffsetFromHost = 0;
+let gameHistory = [];
+let gameStartedAt = null;
+let gameFinishedAt = null;
+let lastMoveNo = 0;
 
 const bEl = document.getElementById("board");
 const mEl = document.getElementById("msg");
@@ -1132,6 +1156,10 @@ function makeSnapshot(to) {
         turn,
         lastMoveAt,
         countdownEndAt,
+        gameHistory,
+        gameStartedAt,
+        gameFinishedAt,
+        lastMoveNo,
         serverTime: Date.now()
     };
 }
@@ -1159,11 +1187,15 @@ function applySnapshot(d) {
         cdTime: normalizeCdTime(d.config?.cdTime)
     };
 
-    board = Array.isArray(d.board) ? d.board : board;
-    seats = Array.isArray(d.seats) ? d.seats : seats;
+    board = sanitizeBoard(d.board, board);
+    seats = sanitizeSeats(d.seats);
     turn = Number.isInteger(d.turn) ? d.turn : 0;
-    lastMoveAt = Array.isArray(d.lastMoveAt) ? d.lastMoveAt : [0, 0, 0, 0];
+    lastMoveAt = Array.isArray(d.lastMoveAt) ? d.lastMoveAt.slice(0, 4).map(x => Number(x) || 0) : [0, 0, 0, 0];
     countdownEndAt = typeof d.countdownEndAt === "number" ? d.countdownEndAt : 0;
+    gameHistory = Array.isArray(d.gameHistory) ? d.gameHistory : [];
+    gameStartedAt = typeof d.gameStartedAt === "number" ? d.gameStartedAt : null;
+    gameFinishedAt = typeof d.gameFinishedAt === "number" ? d.gameFinishedAt : null;
+    lastMoveNo = Number.isInteger(d.lastMoveNo) ? d.lastMoveNo : gameHistory.length;
 
     if (state === "waiting" || state === "countdown" || state === "playing" || state === "finished") {
         if (!bEl.children.length) {
@@ -1178,6 +1210,50 @@ function applySnapshot(d) {
         syncCooldownUI();
         updateCountdownUI();
     }
+}
+
+function sanitizeBoard(incoming, fallback) {
+    if (!Array.isArray(incoming) || incoming.length !== S) {
+        return fallback;
+    }
+
+    const out = [];
+
+    for (let r = 0; r < S; r++) {
+        if (!Array.isArray(incoming[r]) || incoming[r].length !== S) {
+            return fallback;
+        }
+
+        out[r] = [];
+
+        for (let c = 0; c < S; c++) {
+            const v = Number(incoming[r][c]);
+            out[r][c] = v === 1 || v === 2 ? v : 0;
+        }
+    }
+
+    return out;
+}
+
+function sanitizeSeats(incoming) {
+    const out = [null, null, null, null];
+
+    if (!Array.isArray(incoming)) {
+        return out;
+    }
+
+    for (let i = 0; i < 4; i++) {
+        const s = incoming[i];
+
+        if (s && typeof s === "object" && s.id) {
+            out[i] = {
+                id: String(s.id),
+                name: cleanName(s.name) || "Player"
+            };
+        }
+    }
+
+    return out;
 }
 
 function toggleCdSelect() {
@@ -1215,6 +1291,10 @@ function initGameState() {
     turn = 0;
     lastMoveAt = [0, 0, 0, 0];
     countdownEndAt = 0;
+    gameHistory = [];
+    gameStartedAt = null;
+    gameFinishedAt = null;
+    lastMoveNo = 0;
     myCooldown = false;
     mdEl.style.display = "none";
     hideCountdownOverlay();
@@ -1271,6 +1351,10 @@ function hostHandleStartReq(d) {
     state = "countdown";
     countdownEndAt = Date.now() + COUNTDOWN_MS;
     lastMoveAt = [0, 0, 0, 0];
+    gameStartedAt = countdownEndAt;
+    gameFinishedAt = null;
+    gameHistory = [];
+    lastMoveNo = 0;
 
     broadcastSnapshot(null);
     scheduleHostGameStart();
@@ -1377,6 +1461,15 @@ function findFirstMovableTurn() {
 
 function seatColor(idx) {
     return (idx === 0 || idx === 2) ? 1 : 2;
+}
+
+function colorName(col) {
+    return col === 1 ? "黒" : "白";
+}
+
+function coordName(r, c) {
+    const files = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    return files[c] + String(r + 1);
 }
 
 function getFlips(r, c, col) {
@@ -1575,6 +1668,32 @@ function hostHandleMoveReq(d) {
         board[f.r][f.c] = col;
     });
 
+    const counts = countStones();
+
+    lastMoveNo += 1;
+
+    gameHistory.push({
+        no: lastMoveNo,
+        at: Date.now(),
+        seatIndex: actorIdx,
+        seatName: seatNames[actorIdx],
+        playerId: actorUid,
+        playerName: cleanName(seats[actorIdx].name) || "Player",
+        color: col,
+        colorName: colorName(col),
+        r,
+        c,
+        coord: coordName(r, c),
+        flipCount: flips.length,
+        flips: flips.map(f => ({
+            r: f.r,
+            c: f.c,
+            coord: coordName(f.r, f.c)
+        })),
+        black: counts.black,
+        white: counts.white
+    });
+
     if (config.mode === "turn") {
         turn = calculateNextTurn(actorIdx);
     }
@@ -1584,19 +1703,31 @@ function hostHandleMoveReq(d) {
 }
 
 function checkEndHost() {
-    let empty = 0;
-    let b = 0;
-    let w = 0;
-
-    board.flat().forEach(v => {
-        if (v === 0) empty++;
-        else if (v === 1) b++;
-        else if (v === 2) w++;
-    });
+    const counts = countStones();
+    const empty = counts.empty;
 
     if (empty === 0 || !canAnySeatedPlayerMove()) {
         state = "finished";
+        gameFinishedAt = Date.now();
     }
+}
+
+function countStones() {
+    let black = 0;
+    let white = 0;
+    let empty = 0;
+
+    if (!Array.isArray(board)) {
+        return { black, white, empty: 64 };
+    }
+
+    board.flat().forEach(v => {
+        if (v === 1) black++;
+        else if (v === 2) white++;
+        else empty++;
+    });
+
+    return { black, white, empty };
 }
 
 function startLocalCooldown(idx, duration) {
@@ -1749,18 +1880,10 @@ function renderBoard() {
 }
 
 function updateCount() {
-    let b = 0;
-    let w = 0;
+    const counts = countStones();
 
-    if (Array.isArray(board)) {
-        board.flat().forEach(v => {
-            if (v === 1) b++;
-            else if (v === 2) w++;
-        });
-    }
-
-    document.getElementById("score-b").innerText = b;
-    document.getElementById("score-w").innerText = w;
+    document.getElementById("score-b").innerText = counts.black;
+    document.getElementById("score-w").innerText = counts.white;
 }
 
 function renderResultModalIfNeeded() {
@@ -1769,21 +1892,15 @@ function renderResultModalIfNeeded() {
         return;
     }
 
-    let b = 0;
-    let w = 0;
+    const counts = countStones();
 
-    board.flat().forEach(v => {
-        if (v === 1) b++;
-        else if (v === 2) w++;
-    });
-
-    const msg = b > w
+    const msg = counts.black > counts.white
         ? "Team A (黒) の勝利"
-        : (w > b ? "Team B (白) の勝利" : "引き分け");
+        : (counts.white > counts.black ? "Team B (白) の勝利" : "引き分け");
 
     mdEl.style.display = "flex";
     document.getElementById("result-text").innerText = msg;
-    document.getElementById("result-score").innerText = `黒: ${b} / 白: ${w}`;
+    document.getElementById("result-score").innerText = `黒: ${counts.black} / 白: ${counts.white}`;
 }
 
 function updateUI() {
@@ -1918,6 +2035,10 @@ function hostHandleResetReq(d) {
     turn = 0;
     lastMoveAt = [0, 0, 0, 0];
     countdownEndAt = 0;
+    gameHistory = [];
+    gameStartedAt = null;
+    gameFinishedAt = null;
+    lastMoveNo = 0;
 
     broadcastSnapshot(null);
 }
@@ -1942,6 +2063,135 @@ function copyShareUrl() {
     }).catch(() => {
         showToast("コピーに失敗しました");
     });
+}
+
+function copyKifu() {
+    const text = makeKifuText();
+
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(() => {
+            const b = document.getElementById("btn-copy-kifu");
+            const old = b.innerText;
+            b.innerText = "✅ 棋譜をコピーしました";
+            setTimeout(() => {
+                b.innerText = old;
+            }, 2000);
+        }).catch(() => {
+            fallbackCopyText(text);
+        });
+    } else {
+        fallbackCopyText(text);
+    }
+}
+
+function fallbackCopyText(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+
+    try {
+        document.execCommand("copy");
+        showToast("棋譜をコピーしました");
+    } catch (e) {
+        showToast("コピーに失敗しました");
+    }
+
+    document.body.removeChild(ta);
+}
+
+function makeKifuText() {
+    const counts = countStones();
+    const result = counts.black > counts.white
+        ? "Team A (黒) の勝利"
+        : (counts.white > counts.black ? "Team B (白) の勝利" : "引き分け");
+
+    const lines = [];
+
+    lines.push("Quad-Othello 棋譜");
+    lines.push("====================");
+    lines.push(`Room ID: ${rId || "-"}`);
+    lines.push(`Mode: ${config.mode === "turn" ? "ターン制" : "リアルタイム"}`);
+    lines.push(`Cooldown: ${config.mode === "realtime" ? String(config.cdTime / 1000) + "秒" : "-"}`);
+    lines.push(`Host: ${roomHostName || "-"}`);
+    lines.push(`Started: ${formatTime(gameStartedAt)}`);
+    lines.push(`Finished: ${formatTime(gameFinishedAt)}`);
+    lines.push("");
+
+    lines.push("Players");
+    lines.push("--------------------");
+    for (let i = 0; i < 4; i++) {
+        const s = seats[i];
+        lines.push(`${i + 1}. ${seatNames[i]}: ${s ? s.name : "-"}`);
+    }
+    lines.push("");
+
+    lines.push("Result");
+    lines.push("--------------------");
+    lines.push(`${result}`);
+    lines.push(`黒: ${counts.black}`);
+    lines.push(`白: ${counts.white}`);
+    lines.push("");
+
+    lines.push("Moves");
+    lines.push("--------------------");
+
+    if (!gameHistory.length) {
+        lines.push("(no moves)");
+    } else {
+        gameHistory.forEach(m => {
+            lines.push(
+                `${String(m.no).padStart(2, "0")}. ` +
+                `${m.playerName} / ${m.seatName} / ${m.colorName} ` +
+                `${m.coord} ` +
+                `(flip ${m.flipCount}, 黒 ${m.black} - 白 ${m.white})`
+            );
+        });
+    }
+
+    lines.push("");
+    lines.push("Board");
+    lines.push("--------------------");
+    lines.push(boardToText());
+
+    return lines.join("\n");
+}
+
+function boardToText() {
+    const files = "  a b c d e f g h";
+    const lines = [files];
+
+    for (let r = 0; r < S; r++) {
+        const row = [];
+
+        for (let c = 0; c < S; c++) {
+            const v = board?.[r]?.[c] || 0;
+            row.push(v === 1 ? "B" : (v === 2 ? "W" : "."));
+        }
+
+        lines.push(`${r + 1} ${row.join(" ")}`);
+    }
+
+    return lines.join("\n");
+}
+
+function formatTime(t) {
+    if (!t) return "-";
+
+    const d = new Date(t);
+
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
 }
 
 function showToast(msg) {
