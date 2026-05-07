@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Quad-Othello Pro</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        :root {
+            --bg: #000000;
+            --text: #f5f5f7;
+            --board: #1e5631;
+            --board-border: #111111;
+            --line: rgba(255, 255, 255, 0.15);
+            --accent: #0a84ff;
+            --accent-hover: #007aff;
+            --card-bg: #1c1c1e;
+            --border: #2c2c2e;
+            --danger: #ff453a;
+            --black-st: #111111;
+            --white-st: #f5f5f7;
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            height: 100dvh;
+            overflow: hidden;
+            touch-action: manipulation;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        button {
+            outline: none;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s;
+        }
+
+        button:active {
+            transform: scale(0.96);
+        }
+
+        button:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .view {
+            position: absolute;
+            inset: 0;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            background: var(--bg);
+            z-index: 100;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            padding: env(safe-area-inset-top, 10px) 0 env(safe-area-inset-bottom, 10px) 0;
+        }
+
+        .view.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        #login-view, #setup-view {
+            justify-content: center;
+        }
+
+        #game-view {
+            justify-content: flex-start;
+        }
+
+        .box {
+            background: var(--card-bg);
+            padding: 2.5rem 1.5rem;
+            border-radius: 20px;
+            text-align: center;
+            width: 90%;
+            max-width: 360px;
+            border: 1px solid var(--border);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            margin: auto 0;
+        }
+
+        .box h2 {
+            margin: 0 0 1rem 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .box p {
+            font-size: 0.95rem;
+            color: #86868b;
+            margin-bottom: 2rem;
+            line-height: 1.5;
+        }
+
+        .box input[type="text"], .box select {
+            width: 100%;
+            padding: 16px;
+            margin-bottom: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: #2c2c2e;
+            color: white;
+            font-size: 1rem;
+            text-align: center;
+            outline: none;
+            transition: border-color 0.2s, background-color 0.2s;
+            appearance: none;
+        }
+
+        .box input[type="text"]:focus, .box select:focus {
+            border-color: var(--accent);
+            background: #3a3a3c;
+        }
+
+        .btn-primary {
+            width: 100%;
+            padding: 16px;
+            background: var(--accent);
+            color: white;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            width: 100%;
+            padding: 16px;
+            background: #2c2c2e;
+            color: white;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            border: 1px solid var(--border);
+            margin-top: 10px;
+        }
+
+        .btn-secondary:hover {
+            background: #3a3a3c;
+        }
+
+        #game {
+            position: relative;
+            width: 100%;
+            max-width: 500px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            z-index: 10;
+            min-height: min-content;
+        }
+        
+        #header-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            width: 100%;
+            padding: 0 4px;
+            gap: 8px;
+        }
+
+        #game-mode-badge {
+            background: #2c2c2e;
+            padding: 6px 12px;
+            border-radius: 14px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #86868b;
+            border: 1px solid var(--border);
+            white-space: nowrap;
+        }
+
+        #share {
+            background: transparent;
+            color: var(--accent);
+            padding: 6px 14px;
+            border-radius: 14px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border: 1px solid var(--border);
+            white-space: nowrap;
+        }
+
+        #share:active {
+            background: var(--border);
+        }
+
+        #score-board {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            width: 100%;
+            justify-content: center;
+        }
+
+        .score-box {
+            padding: 8px 20px;
+            border-radius: 14px;
+            font-weight: 600;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            min-width: 100px;
+            justify-content: center;
+        }
+
+        .score-box .dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        .score-box.black { color: var(--text); }
+        .score-box.white { color: var(--text); }
+        .score-box.black .dot { background: var(--black-st); border: 1px solid #333; }
+        .score-box.white .dot { background: var(--white-st); }
+
+        #seats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            width: 100%;
+            margin-bottom: 16px;
+        }
+
+        .seat {
+            background: var(--card-bg);
+            color: #86868b;
+            padding: 10px 6px;
+            border-radius: 12px;
+            font-weight: 600;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            border: 2px solid transparent;
+            position: relative;
+            overflow: hidden;
+            min-height: 58px;
+        }
+
+        .seat span:first-child {
+            font-size: 0.7rem;
+            margin-bottom: 4px;
+            z-index: 2;
+        }
+
+        .seat span:nth-child(2) {
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            width: 100%;
+            text-align: center;
+            z-index: 2;
+            color: #d1d1d6;
+        }
+
+        .seat.occupied {
+            background: #2c2c2e;
+        }
+
+        .seat.my-seat {
+            border-color: var(--accent);
+            background: rgba(10, 132, 255, 0.1);
+        }
+
+        .seat.active-turn {
+            border-color: var(--text);
+            box-shadow: 0 0 12px rgba(255, 255, 255, 0.1);
+        }
+        
+        .cd-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            z-index: 1;
+            background: rgba(0,0,0,0.3);
+            display: none;
+        }
+
+        .cd-fill {
+            height: 100%;
+            background: var(--danger);
+            width: 0%;
+        }
+
+        #board-wrapper {
+            position: relative;
+            width: 96%;
+            max-width: min(420px, 55vh); 
+            aspect-ratio: 1/1;
+            margin: 0 auto 16px auto;
+        }
+
+        #board {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            width: 100%;
+            height: 100%;
+            background: var(--board);
+            border-radius: 8px;
+            gap: 2px;
+            background-color: var(--board-border);
+            border: 2px solid var(--board-border);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.7);
+            overflow: hidden;
+        }
+
+        #board.cooldown .cell {
+            cursor: not-allowed;
+        }
+
+        .cell {
+            background: var(--board);
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+
+        .cell.valid-move::after {
+            content: '';
+            position: absolute;
+            width: 12%;
+            height: 12%;
+            border-radius: 50%;
+            background: var(--line);
+            z-index: 1;
+        }
+
+        .stone-container {
+            width: 82%;
+            height: 82%;
+            pointer-events: none;
+            position: relative;
+            z-index: 2;
+        }
+
+        .stone {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            position: absolute;
+            transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.2s;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.6), inset 0 -2px 4px rgba(0,0,0,0.3);
+        }
+
+        .stone[data-color="0"] {
+            transform: scale(0);
+            opacity: 0;
+        }
+
+        .stone[data-color="1"] {
+            transform: scale(1);
+            opacity: 1;
+            background: radial-gradient(circle at 30% 30%, #444, var(--black-st));
+        }
+
+        .stone[data-color="2"] {
+            transform: scale(1);
+            opacity: 1;
+            background: radial-gradient(circle at 30% 30%, #fff, #d1d1d6);
+        }
+
+        #status {
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            background: var(--card-bg);
+            border-radius: 22px;
+            border: 1px solid var(--border);
+            margin-bottom: 20px;
+            padding: 0 12px;
+        }
+
+        #msg {
+            font-size: 0.95rem;
+            font-weight: 600;
+            text-align: center;
+            color: #86868b;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        #toast {
+            position: fixed;
+            top: env(safe-area-inset-top, 24px);
+            left: 50%;
+            transform: translateX(-50%) translateY(-20px) scale(0.95);
+            background: rgba(44, 44, 46, 0.95);
+            backdrop-filter: blur(10px);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 200;
+            border: 1px solid var(--border);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+            white-space: nowrap;
+            max-width: 92vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0) scale(1);
+        }
+
+        #modal {
+            display: none;
+            position: absolute;
+            inset: -2px;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+            z-index: 50;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 24px;
+            border-radius: 8px;
+        }
+
+        #modal h2 {
+            margin-bottom: 16px;
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: white;
+            letter-spacing: 0.5px;
+        }
+
+        #result-score {
+            font-size: 1.2rem;
+            color: #d1d1d6;
+            margin-bottom: 32px;
+            font-weight: 600;
+        }
+
+        #modal button {
+            padding: 14px 36px;
+            background: var(--text);
+            color: var(--bg);
+            font-size: 1.1rem;
+            border-radius: 24px;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+
+<div id="login-view" class="view active">
+    <div class="box">
+        <h2>Quad-Othello</h2>
+        <p>プレイヤー名を入力してください</p>
+        <input type="text" id="name-input" placeholder="名前 (10文字以内)" maxlength="10" autocomplete="off">
+
+        <div id="action-create" style="display: none;">
+            <button class="btn-primary" onclick="handleCreateRoom()">新しく部屋を作成</button>
+        </div>
+
+        <div id="action-join" style="display: none;">
+            <button class="btn-primary" onclick="handleJoinRoom()">この部屋に参加</button>
+        </div>
+    </div>
+</div>
+
+<div id="setup-view" class="view">
+    <div class="box">
+        <h2>ルールの設定</h2>
+        <p id="setup-host-label">ホストとしてルールを選択してください</p>
+
+        <select id="config-mode" onchange="toggleCdSelect()">
+            <option value="realtime">リアルタイム</option>
+            <option value="turn">ターン制</option>
+        </select>
+
+        <select id="config-cd">
+            <option value="3000">クールダウン (3秒)</option>
+            <option value="5000">クールダウン (5秒)</option>
+            <option value="7000" selected>クールダウン (7秒)</option>
+            <option value="10000">クールダウン (10秒)</option>
+        </select>
+
+        <button class="btn-primary" onclick="submitConfig()">このルールで開始</button>
+    </div>
+</div>
+
+<div id="game-view" class="view">
+    <div id="game">
+        <div id="header-info">
+            <span id="game-mode-badge">同期中...</span>
+            <button id="share" onclick="copyShareUrl()">🔗 招待URL</button>
+        </div>
+
+        <div id="score-board">
+            <div class="score-box black">
+                <div class="dot"></div>
+                <span id="score-b">2</span>
+            </div>
+            <div class="score-box white">
+                <div class="dot"></div>
+                <span id="score-w">2</span>
+            </div>
+        </div>
+
+        <div id="seats">
+            <button id="seat-0" class="seat" onclick="takeSeat(0)">
+                <span>Team A(1) [黒]</span>
+                <span id="name-0">着席する</span>
+                <div class="cd-bar"><div class="cd-fill" id="cd-0"></div></div>
+            </button>
+
+            <button id="seat-1" class="seat" onclick="takeSeat(1)">
+                <span>Team B(1) [白]</span>
+                <span id="name-1">着席する</span>
+                <div class="cd-bar"><div class="cd-fill" id="cd-1"></div></div>
+            </button>
+
+            <button id="seat-2" class="seat" onclick="takeSeat(2)">
+                <span>Team A(2) [黒]</span>
+                <span id="name-2">着席する</span>
+                <div class="cd-bar"><div class="cd-fill" id="cd-2"></div></div>
+            </button>
+
+            <button id="seat-3" class="seat" onclick="takeSeat(3)">
+                <span>Team B(2) [白]</span>
+                <span id="name-3">着席する</span>
+                <div class="cd-bar"><div class="cd-fill" id="cd-3"></div></div>
+            </button>
+        </div>
+
+        <div id="board-wrapper">
+            <div id="board"></div>
+
+            <div id="modal">
+                <h2 id="result-text"></h2>
+                <p id="result-score"></p>
+                <button onclick="sendReset()" id="btn-reset">もう一度遊ぶ</button>
+            </div>
+        </div>
+
+        <div id="status">
+            <div id="msg">同期中...</div>
+        </div>
+    </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+let rId = urlParams.get('r');
+let rKey = urlParams.get('key');
+
+let isHost = false;
+let topic = "";
+let client = null;
+let mqttReady = false;
+let pendingPublishes = [];
+let latestSeq = 0;
+
+let uid = localStorage.getItem('qr_uid');
+if (!uid) {
+    uid = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem('qr_uid', uid);
+}
+
+let myName = localStorage.getItem('qr_name') || "";
+document.getElementById('name-input').value = myName;
+
+const S = 8;
+const seatNames = [
+    "Team A(1) [黒]",
+    "Team B(1) [白]",
+    "Team A(2) [黒]",
+    "Team B(2) [白]"
+];
+
+let roomHostId = null;
+let roomHostName = null;
+
+let config = {
+    mode: "realtime",
+    cdTime: 7000
+};
+
+let state = "init";
+let board = [];
+let seats = [null, null, null, null];
+let turn = 0;
+let lastMoveAt = [0, 0, 0, 0];
+let myCooldown = false;
+let localCooldownTimer = null;
+
+const bEl = document.getElementById('board');
+const mEl = document.getElementById('msg');
+const mdEl = document.getElementById('modal');
+const tEl = document.getElementById('toast');
+const badgeEl = document.getElementById('game-mode-badge');
+
+window.onload = () => {
+    if (rId && rKey) {
+        document.getElementById('action-join').style.display = 'block';
+    } else {
+        document.getElementById('action-create').style.display = 'block';
+    }
+};
+
+function cleanName(name) {
+    return String(name || "")
+        .trim()
+        .replace(/[<>]/g, "")
+        .slice(0, 10);
+}
+
+function newMsgId() {
+    return uid + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+}
+
+function switchView(viewId) {
+    document.querySelectorAll('.view').forEach(v => {
+        v.classList.remove('active');
+    });
+
+    document.getElementById(viewId).classList.add('active');
+}
+
+function safePublish(payload) {
+    if (!topic) return;
+
+    const msg = {
+        ...payload,
+        msgId: payload.msgId || newMsgId()
+    };
+
+    if (mqttReady && client) {
+        client.publish(topic, JSON.stringify(msg));
+    } else {
+        pendingPublishes.push(msg);
+    }
+}
+
+function flushPendingPublishes() {
+    if (!mqttReady || !client) return;
+
+    while (pendingPublishes.length > 0) {
+        const p = pendingPublishes.shift();
+        client.publish(topic, JSON.stringify(p));
+    }
+}
+
+function initMQTT() {
+    client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+        clean: true,
+        reconnectPeriod: 1000,
+        connectTimeout: 5000
+    });
+
+    client.on('connect', () => {
+        mqttReady = true;
+        client.subscribe(topic);
+        flushPendingPublishes();
+
+        if (!isHost) {
+            safePublish({
+                t: "hello_req",
+                from: uid
+            });
+        } else {
+            broadcastHostPreparing();
+        }
+    });
+
+    client.on('reconnect', () => {
+        mqttReady = false;
+        mEl.innerText = "再接続中...";
+    });
+
+    client.on('close', () => {
+        mqttReady = false;
+    });
+
+    client.on('error', () => {
+        showToast("通信に問題があります");
+    });
+
+    client.on('message', (_, msg) => {
+        let d;
+
+        try {
+            d = JSON.parse(msg.toString());
+        } catch (e) {
+            return;
+        }
+
+        handleMessage(d);
+    });
+}
+
+function handleMessage(d) {
+    if (!d || typeof d !== "object") return;
+
+    if (d.t === "hello_req") {
+        if (!isHost) return;
+
+        broadcastSnapshot(d.from || null);
+        broadcastHostPreparing();
+        return;
+    }
+
+    if (d.t === "host_preparing") {
+        if (roomHostId && d.hostId !== roomHostId) return;
+
+        roomHostId = d.hostId;
+        roomHostName = cleanName(d.hostName) || "Host";
+
+        if (state === "init") {
+            mEl.innerText = `${roomHostName} が設定中です...`;
+        }
+
+        return;
+    }
+
+    if (d.t === "config_set") {
+        if (!isHost) return;
+        if (d.hostId !== uid) return;
+
+        config.mode = d.config?.mode === "turn" ? "turn" : "realtime";
+        config.cdTime = normalizeCdTime(d.config?.cdTime);
+
+        initGameState();
+        state = "waiting";
+        turn = 0;
+        lastMoveAt = [0, 0, 0, 0];
+
+        broadcastSnapshot(null);
+        switchView("game-view");
+        return;
+    }
+
+    if (d.t === "seat_req") {
+        if (!isHost) return;
+        hostHandleSeatReq(d);
+        return;
+    }
+
+    if (d.t === "move_req") {
+        if (!isHost) return;
+        hostHandleMoveReq(d);
+        return;
+    }
+
+    if (d.t === "reset_req") {
+        if (!isHost) return;
+        hostHandleResetReq(d);
+        return;
+    }
+
+    if (d.t === "snapshot") {
+        if (roomHostId && d.hostId !== roomHostId) return;
+
+        if (!roomHostId) {
+            roomHostId = d.hostId;
+        }
+
+        if (typeof d.seq === "number" && d.seq < latestSeq) return;
+        if (typeof d.seq === "number") latestSeq = d.seq;
+
+        applySnapshot(d);
+        return;
+    }
+}
+
+function normalizeCdTime(v) {
+    const n = parseInt(v, 10);
+    const allowed = [3000, 5000, 7000, 10000];
+
+    if (allowed.includes(n)) return n;
+
+    return 7000;
+}
+
+function handleCreateRoom() {
+    const v = cleanName(document.getElementById('name-input').value);
+
+    if (!v) {
+        showToast("名前を入力してください");
+        return;
+    }
+
+    myName = v;
+    localStorage.setItem('qr_name', myName);
+
+    rId = Math.random().toString(36).slice(2, 10);
+    rKey = (window.crypto && window.crypto.randomUUID)
+        ? crypto.randomUUID().split('-')[0]
+        : Math.random().toString(36).slice(2, 10);
+
+    window.history.replaceState(null, '', `?r=${rId}&key=${rKey}`);
+
+    isHost = true;
+    roomHostId = uid;
+    roomHostName = myName;
+    topic = `qr/oth/${rId}/${rKey}`;
+
+    sessionStorage.setItem(`host_${rId}`, "1");
+
+    document.getElementById("setup-host-label").innerText = `${myName} さんがホストです`;
+
+    initMQTT();
+    switchView("setup-view");
+}
+
+function handleJoinRoom() {
+    const v = cleanName(document.getElementById('name-input').value);
+
+    if (!v) {
+        showToast("名前を入力してください");
+        return;
+    }
+
+    myName = v;
+    localStorage.setItem('qr_name', myName);
+
+    if (!rId || !rKey) {
+        showToast("招待URLが正しくありません");
+        return;
+    }
+
+    isHost = sessionStorage.getItem(`host_${rId}`) === "1";
+    topic = `qr/oth/${rId}/${rKey}`;
+
+    initMQTT();
+    switchView("game-view");
+
+    mEl.innerText = "部屋の状態を確認しています...";
+
+    setTimeout(() => {
+        if (state === "init") {
+            mEl.innerText = roomHostName
+                ? `${roomHostName} が設定中です...`
+                : "ホストの設定を待っています...";
+        }
+    }, 1000);
+}
+
+function broadcastHostPreparing() {
+    if (!isHost) return;
+    if (!roomHostId || roomHostId !== uid) return;
+
+    safePublish({
+        t: "host_preparing",
+        hostId: uid,
+        hostName: myName
+    });
+}
+
+function makeSnapshot(to) {
+    latestSeq += 1;
+
+    return {
+        t: "snapshot",
+        to,
+        seq: latestSeq,
+        hostId: uid,
+        hostName: myName,
+        state,
+        config,
+        board,
+        seats,
+        turn,
+        lastMoveAt,
+        serverTime: Date.now()
+    };
+}
+
+function broadcastSnapshot(to) {
+    if (!isHost) return;
+
+    safePublish(makeSnapshot(to));
+}
+
+function applySnapshot(d) {
+    if (d.to && d.to !== uid) return;
+
+    roomHostId = d.hostId;
+    roomHostName = cleanName(d.hostName) || "Host";
+    state = d.state || "init";
+
+    config = {
+        mode: d.config?.mode === "turn" ? "turn" : "realtime",
+        cdTime: normalizeCdTime(d.config?.cdTime)
+    };
+
+    board = Array.isArray(d.board) ? d.board : board;
+    seats = Array.isArray(d.seats) ? d.seats : seats;
+    turn = Number.isInteger(d.turn) ? d.turn : 0;
+    lastMoveAt = Array.isArray(d.lastMoveAt) ? d.lastMoveAt : [0, 0, 0, 0];
+
+    if (state === "waiting" || state === "playing" || state === "finished") {
+        if (!bEl.children.length) {
+            initB();
+        } else {
+            renderBoard();
+        }
+
+        switchView("game-view");
+        updateUI();
+        updateValidMoves();
+        syncCooldownUI();
+    }
+}
+
+function toggleCdSelect() {
+    const mode = document.getElementById('config-mode').value;
+    document.getElementById('config-cd').disabled = (mode === 'turn');
+}
+
+function submitConfig() {
+    if (!isHost || roomHostId !== uid) {
+        showToast("ホストのみ設定できます");
+        return;
+    }
+
+    const mode = document.getElementById('config-mode').value;
+    const cdTime = parseInt(document.getElementById('config-cd').value, 10);
+
+    safePublish({
+        t: "config_set",
+        hostId: uid,
+        hostName: myName,
+        config: {
+            mode,
+            cdTime
+        }
+    });
+}
+
+function initGameState() {
+    board = Array.from({ length: S }, () => Array(S).fill(0));
+    board[3][3] = 2;
+    board[4][4] = 2;
+    board[3][4] = 1;
+    board[4][3] = 1;
+    seats = [null, null, null, null];
+    turn = 0;
+    lastMoveAt = [0, 0, 0, 0];
+    myCooldown = false;
+    mdEl.style.display = "none";
+}
+
+function initB() {
+    bEl.innerHTML = "";
+
+    for (let r = 0; r < S; r++) {
+        for (let c = 0; c < S; c++) {
+            const cell = document.createElement("div");
+            cell.className = "cell";
+            cell.onclick = () => clickCell(r, c);
+
+            const stContainer = document.createElement("div");
+            stContainer.className = "stone-container";
+
+            const st = document.createElement("div");
+            st.className = "stone";
+            st.dataset.color = "0";
+
+            stContainer.appendChild(st);
+            cell.appendChild(stContainer);
+            bEl.appendChild(cell);
+        }
+    }
+
+    renderBoard();
+    updateValidMoves();
+}
+
+function takeSeat(idx) {
+    if (state !== "waiting" && state !== "playing") {
+        showToast("まだ着席できません");
+        return;
+    }
+
+    if (!Number.isInteger(idx) || idx < 0 || idx >= 4) return;
+
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+
+    if (seats[idx]) {
+        if (seats[idx].id === uid) {
+            showToast(`あなたは ${seatNames[idx]} に座っています`);
+        } else {
+            showToast(`ここは ${seats[idx].name} さんの席です`);
+        }
+        return;
+    }
+
+    if (myIdx !== -1) {
+        showToast(`あなたはすでに ${seatNames[myIdx]} に座っています`);
+        return;
+    }
+
+    safePublish({
+        t: "seat_req",
+        from: uid,
+        name: myName,
+        idx
+    });
+}
+
+function hostHandleSeatReq(d) {
+    if (state !== "waiting" && state !== "playing") return;
+
+    const idx = Number(d.idx);
+    const id = String(d.from || "");
+    const name = cleanName(d.name) || "Player";
+
+    if (!Number.isInteger(idx) || idx < 0 || idx >= 4) return;
+    if (!id) return;
+
+    if (seats[idx]) return;
+    if (seats.some(s => s && s.id === id)) return;
+
+    seats[idx] = {
+        id,
+        name
+    };
+
+    if (state === "waiting" && seats.every(s => s !== null)) {
+        state = "playing";
+        turn = findFirstMovableTurn();
+    }
+
+    broadcastSnapshot(null);
+}
+
+function findFirstMovableTurn() {
+    for (let i = 0; i < 4; i++) {
+        const col = seatColor(i);
+        if (canMove(col)) return i;
+    }
+
+    return 0;
+}
+
+function seatColor(idx) {
+    return (idx === 0 || idx === 2) ? 1 : 2;
+}
+
+function getFlips(r, c, col) {
+    if (!Array.isArray(board) || !board[r] || board[r][c] !== 0) return [];
+
+    const dirs = [
+        [-1, -1], [-1, 0], [-1, 1],
+        [0, -1],           [0, 1],
+        [1, -1],  [1, 0],  [1, 1]
+    ];
+
+    const opp = col === 1 ? 2 : 1;
+    let flips = [];
+
+    for (const [dr, dc] of dirs) {
+        let temp = [];
+        let nr = r + dr;
+        let nc = c + dc;
+
+        while (
+            nr >= 0 &&
+            nr < S &&
+            nc >= 0 &&
+            nc < S &&
+            board[nr][nc] === opp
+        ) {
+            temp.push({ r: nr, c: nc });
+            nr += dr;
+            nc += dc;
+        }
+
+        if (
+            nr >= 0 &&
+            nr < S &&
+            nc >= 0 &&
+            nc < S &&
+            board[nr][nc] === col &&
+            temp.length > 0
+        ) {
+            flips.push(...temp);
+        }
+    }
+
+    return flips;
+}
+
+function canMove(col) {
+    if (!Array.isArray(board) || board.length !== S) return false;
+
+    for (let r = 0; r < S; r++) {
+        for (let c = 0; c < S; c++) {
+            if (getFlips(r, c, col).length > 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function calculateNextTurn(currentIdx) {
+    for (let i = 1; i <= 4; i++) {
+        const next = (currentIdx + i) % 4;
+        const col = seatColor(next);
+
+        if (canMove(col)) {
+            return next;
+        }
+    }
+
+    return currentIdx;
+}
+
+function updateValidMoves() {
+    document.querySelectorAll(".cell").forEach(c => {
+        c.classList.remove("valid-move");
+    });
+
+    if (state !== "playing") return;
+
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+    if (myIdx === -1) return;
+
+    if (config.mode === "turn" && turn !== myIdx) return;
+    if (config.mode === "realtime" && myCooldown) return;
+
+    const myCol = seatColor(myIdx);
+
+    for (let r = 0; r < S; r++) {
+        for (let c = 0; c < S; c++) {
+            if (getFlips(r, c, myCol).length > 0) {
+                const cell = bEl.children[r * S + c];
+                if (cell) cell.classList.add("valid-move");
+            }
+        }
+    }
+}
+
+function clickCell(r, c) {
+    if (state !== "playing") return;
+
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+
+    if (myIdx === -1) {
+        showToast("観戦中です");
+        return;
+    }
+
+    if (config.mode === "turn" && turn !== myIdx) {
+        showToast("あなたの番ではありません");
+        return;
+    }
+
+    if (config.mode === "realtime" && myCooldown) {
+        return;
+    }
+
+    const myCol = seatColor(myIdx);
+    const flips = getFlips(r, c, myCol);
+
+    if (flips.length === 0) return;
+
+    safePublish({
+        t: "move_req",
+        from: uid,
+        idx: myIdx,
+        r,
+        c
+    });
+
+    if (config.mode === "realtime") {
+        startLocalCooldown(myIdx, config.cdTime);
+    }
+}
+
+function hostHandleMoveReq(d) {
+    if (state !== "playing") return;
+
+    const actorUid = String(d.from || "");
+    const actorIdx = Number(d.idx);
+    const r = Number(d.r);
+    const c = Number(d.c);
+
+    if (!Number.isInteger(actorIdx) || actorIdx < 0 || actorIdx >= 4) return;
+    if (!Number.isInteger(r) || r < 0 || r >= S) return;
+    if (!Number.isInteger(c) || c < 0 || c >= S) return;
+
+    if (!seats[actorIdx]) return;
+    if (seats[actorIdx].id !== actorUid) return;
+
+    if (config.mode === "turn" && turn !== actorIdx) return;
+
+    if (config.mode === "realtime") {
+        const now = Date.now();
+        const last = Number(lastMoveAt[actorIdx] || 0);
+
+        if (now - last < config.cdTime) {
+            return;
+        }
+
+        lastMoveAt[actorIdx] = now;
+    }
+
+    if (!board[r] || board[r][c] !== 0) return;
+
+    const col = seatColor(actorIdx);
+    const flips = getFlips(r, c, col);
+
+    if (flips.length === 0) return;
+
+    board[r][c] = col;
+
+    flips.forEach(f => {
+        board[f.r][f.c] = col;
+    });
+
+    if (config.mode === "turn") {
+        turn = calculateNextTurn(actorIdx);
+    }
+
+    checkEndHost();
+    broadcastSnapshot(null);
+}
+
+function checkEndHost() {
+    let empty = 0;
+    let b = 0;
+    let w = 0;
+
+    board.flat().forEach(v => {
+        if (v === 0) empty++;
+        else if (v === 1) b++;
+        else if (v === 2) w++;
+    });
+
+    if (empty === 0 || (!canMove(1) && !canMove(2))) {
+        state = "finished";
+    }
+}
+
+function startLocalCooldown(idx, duration) {
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+
+    if (idx !== myIdx) {
+        animateCooldownBar(idx, duration);
+        return;
+    }
+
+    myCooldown = true;
+    bEl.classList.add("cooldown");
+    updateValidMoves();
+
+    if (localCooldownTimer) {
+        clearTimeout(localCooldownTimer);
+    }
+
+    animateCooldownBar(idx, duration);
+
+    localCooldownTimer = setTimeout(() => {
+        myCooldown = false;
+        bEl.classList.remove("cooldown");
+        updateValidMoves();
+    }, duration);
+}
+
+function animateCooldownBar(idx, duration) {
+    const fill = document.getElementById(`cd-${idx}`);
+    if (!fill || config.mode !== "realtime") return;
+
+    fill.style.transition = "none";
+    fill.style.width = "100%";
+
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            fill.style.transition = `width ${duration}ms linear`;
+            fill.style.width = "0%";
+        });
+    });
+}
+
+function syncCooldownUI() {
+    if (config.mode !== "realtime") {
+        myCooldown = false;
+        bEl.classList.remove("cooldown");
+        document.querySelectorAll(".cd-fill").forEach(el => {
+            el.style.transition = "none";
+            el.style.width = "0%";
+        });
+        return;
+    }
+
+    const now = Date.now();
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+    let stillCooling = false;
+
+    for (let i = 0; i < 4; i++) {
+        const last = Number(lastMoveAt[i] || 0);
+        const remain = Math.max(0, config.cdTime - (now - last));
+
+        if (remain > 0) {
+            animateCooldownBar(i, remain);
+
+            if (i === myIdx) {
+                stillCooling = true;
+            }
+        }
+    }
+
+    myCooldown = stillCooling;
+    bEl.classList.toggle("cooldown", myCooldown);
+}
+
+function drawStone(r, c, col) {
+    const cell = bEl.children[r * S + c];
+    if (!cell) return;
+
+    const st = cell.querySelector(".stone");
+    if (st) st.dataset.color = String(col);
+}
+
+function renderBoard() {
+    if (!Array.isArray(board) || board.length !== S) return;
+
+    for (let r = 0; r < S; r++) {
+        for (let c = 0; c < S; c++) {
+            drawStone(r, c, board[r][c]);
+        }
+    }
+
+    updateCount();
+    renderResultModalIfNeeded();
+}
+
+function updateCount() {
+    let b = 0;
+    let w = 0;
+
+    if (Array.isArray(board)) {
+        board.flat().forEach(v => {
+            if (v === 1) b++;
+            else if (v === 2) w++;
+        });
+    }
+
+    document.getElementById("score-b").innerText = b;
+    document.getElementById("score-w").innerText = w;
+}
+
+function renderResultModalIfNeeded() {
+    if (state !== "finished") {
+        mdEl.style.display = "none";
+        return;
+    }
+
+    let b = 0;
+    let w = 0;
+
+    board.flat().forEach(v => {
+        if (v === 1) b++;
+        else if (v === 2) w++;
+    });
+
+    const msg = b > w
+        ? "Team A (黒) の勝利"
+        : (w > b ? "Team B (白) の勝利" : "引き分け");
+
+    mdEl.style.display = "flex";
+    document.getElementById("result-text").innerText = msg;
+    document.getElementById("result-score").innerText = `黒: ${b} / 白: ${w}`;
+}
+
+function updateUI() {
+    if (state === "init") return;
+
+    const modeText = config.mode === "turn"
+        ? "ターン制"
+        : `リアルタイム (CD: ${config.cdTime / 1000}s)`;
+
+    badgeEl.innerText = modeText;
+
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+    const isParticipant = myIdx !== -1;
+
+    seats.forEach((sd, i) => {
+        const btn = document.getElementById(`seat-${i}`);
+        const nSp = document.getElementById(`name-${i}`);
+
+        btn.classList.remove("active-turn");
+
+        if (sd) {
+            nSp.innerText = cleanName(sd.name) || "Player";
+            btn.classList.add("occupied");
+            btn.classList.toggle("my-seat", sd.id === uid);
+
+            if (state === "playing" && config.mode === "turn" && turn === i) {
+                btn.classList.add("active-turn");
+            }
+        } else {
+            const isFull = seats.every(s => s !== null);
+            nSp.innerText = isFull ? "満席" : "着席する";
+            btn.classList.remove("occupied", "my-seat");
+
+            if (isFull) {
+                btn.classList.add("occupied");
+            }
+        }
+
+        const cdBar = btn.querySelector(".cd-bar");
+        if (cdBar) {
+            cdBar.style.display = config.mode === "realtime" ? "block" : "none";
+        }
+    });
+
+    if (state === "waiting") {
+        const emptyCount = seats.filter(s => s === null).length;
+        mEl.innerText = emptyCount > 0
+            ? `あと ${emptyCount} 人の参加を待っています`
+            : "全員揃いました";
+        mEl.style.color = "var(--text)";
+    } else if (state === "playing") {
+        if (config.mode === "turn") {
+            const turnName = seats[turn]?.name || "次のプレイヤー";
+
+            mEl.innerText = turn === myIdx
+                ? "あなたの番です"
+                : `${turnName} の番です`;
+
+            mEl.style.color = turn === myIdx
+                ? "var(--accent)"
+                : "#86868b";
+        } else {
+            mEl.innerText = "対戦中";
+            mEl.style.color = "var(--text)";
+        }
+    } else if (state === "finished") {
+        mEl.innerText = "ゲーム終了";
+        mEl.style.color = "#86868b";
+    }
+
+    document.getElementById("btn-reset").style.display = isParticipant ? "inline-block" : "none";
+
+    renderResultModalIfNeeded();
+}
+
+function sendReset() {
+    const myIdx = seats.findIndex(s => s && s.id === uid);
+
+    if (myIdx === -1) {
+        showToast("参加者のみリセット可能です");
+        return;
+    }
+
+    safePublish({
+        t: "reset_req",
+        from: uid
+    });
+}
+
+function hostHandleResetReq(d) {
+    if (state !== "finished" && state !== "playing" && state !== "waiting") return;
+
+    const requester = String(d.from || "");
+    if (!seats.some(s => s && s.id === requester)) return;
+
+    board = Array.from({ length: S }, () => Array(S).fill(0));
+    board[3][3] = 2;
+    board[4][4] = 2;
+    board[3][4] = 1;
+    board[4][3] = 1;
+
+    state = seats.every(s => s !== null) ? "playing" : "waiting";
+    turn = findFirstMovableTurn();
+    lastMoveAt = [0, 0, 0, 0];
+
+    broadcastSnapshot(null);
+}
+
+function copyShareUrl() {
+    const shareUrl = window.location.origin + window.location.pathname + `?r=${rId}&key=${rKey}`;
+
+    if (!navigator.clipboard) {
+        showToast("コピー機能が使えません");
+        return;
+    }
+
+    navigator.clipboard.writeText(shareUrl).then(() => {
+        const b = document.getElementById("share");
+        const origText = b.innerText;
+
+        b.innerText = "✅ コピー完了";
+
+        setTimeout(() => {
+            b.innerText = origText;
+        }, 2000);
+    }).catch(() => {
+        showToast("コピーに失敗しました");
+    });
+}
+
+function showToast(msg) {
+    tEl.innerText = msg;
+    tEl.classList.add("show");
+
+    setTimeout(() => {
+        tEl.classList.remove("show");
+    }, 2500);
+}
+</script>
+
+</body>
+</html>
