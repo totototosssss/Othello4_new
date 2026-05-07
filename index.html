@@ -42,7 +42,7 @@
             border: none;
             cursor: pointer;
             font-family: inherit;
-            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s;
+            transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s, opacity 0.2s;
         }
 
         button:active {
@@ -266,7 +266,7 @@
             grid-template-columns: 1fr 1fr;
             gap: 8px;
             width: 100%;
-            margin-bottom: 16px;
+            margin-bottom: 12px;
         }
 
         .seat {
@@ -330,6 +330,26 @@
             height: 100%;
             background: var(--danger);
             width: 0%;
+        }
+
+        #host-controls {
+            width: 100%;
+            display: none;
+            margin-bottom: 14px;
+        }
+
+        #host-start-btn {
+            width: 100%;
+            padding: 13px;
+            border-radius: 14px;
+            background: var(--accent);
+            color: white;
+            font-size: 1rem;
+            font-weight: 700;
+        }
+
+        #host-start-btn:hover {
+            background: var(--accent-hover);
         }
 
         #board-wrapper {
@@ -501,6 +521,34 @@
             border-radius: 24px;
             font-weight: 700;
         }
+
+        #countdown-overlay {
+            display: none;
+            position: absolute;
+            inset: -2px;
+            background: rgba(0, 0, 0, 0.58);
+            backdrop-filter: blur(6px);
+            z-index: 45;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            border-radius: 8px;
+            pointer-events: none;
+        }
+
+        #countdown-number {
+            font-size: 4.2rem;
+            font-weight: 800;
+            color: white;
+            line-height: 1;
+        }
+
+        #countdown-label {
+            margin-top: 10px;
+            font-size: 1rem;
+            font-weight: 700;
+            color: #d1d1d6;
+        }
     </style>
 </head>
 <body>
@@ -539,7 +587,7 @@
             <option value="10000">クールダウン (10秒)</option>
         </select>
 
-        <button class="btn-primary" onclick="submitConfig()">このルールで開始</button>
+        <button class="btn-primary" onclick="submitConfig()">このルールで待機画面へ</button>
     </div>
 </div>
 
@@ -587,8 +635,17 @@
             </button>
         </div>
 
+        <div id="host-controls">
+            <button id="host-start-btn" onclick="hostStartCountdown()">ゲーム開始</button>
+        </div>
+
         <div id="board-wrapper">
             <div id="board"></div>
+
+            <div id="countdown-overlay">
+                <div id="countdown-number">3</div>
+                <div id="countdown-label">Starting...</div>
+            </div>
 
             <div id="modal">
                 <h2 id="result-text"></h2>
@@ -617,6 +674,9 @@ let mqttReady = false;
 let pendingPublishes = [];
 let latestSeq = 0;
 let mqttInitialized = false;
+let hostFinalStartTimer = null;
+let countdownInterval = null;
+let hostCandidateNameById = {};
 
 let uid = localStorage.getItem("qr_uid");
 if (!uid) {
@@ -628,6 +688,8 @@ let myName = localStorage.getItem("qr_name") || "";
 document.getElementById("name-input").value = myName;
 
 const S = 8;
+const COUNTDOWN_MS = 3000;
+
 const seatNames = [
     "Team A(1) [黒]",
     "Team B(1) [白]",
@@ -648,14 +710,20 @@ let board = [];
 let seats = [null, null, null, null];
 let turn = 0;
 let lastMoveAt = [0, 0, 0, 0];
+let countdownEndAt = 0;
+let hostProcessedMsgIds = new Set();
 let myCooldown = false;
 let localCooldownTimer = null;
+let timeOffsetFromHost = 0;
 
 const bEl = document.getElementById("board");
 const mEl = document.getElementById("msg");
 const mdEl = document.getElementById("modal");
 const tEl = document.getElementById("toast");
 const badgeEl = document.getElementById("game-mode-badge");
+const countdownOverlayEl = document.getElementById("countdown-overlay");
+const countdownNumberEl = document.getElementById("countdown-number");
+const countdownLabelEl = document.getElementById("countdown-label");
 
 window.onload = () => {
     if (!rId || !rKey) {
@@ -674,6 +742,23 @@ function cleanName(name) {
 
 function newMsgId() {
     return uid + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+}
+
+function rememberHostMsg(msgId) {
+    if (!msgId) return false;
+
+    if (hostProcessedMsgIds.has(msgId)) {
+        return true;
+    }
+
+    hostProcessedMsgIds.add(msgId);
+
+    if (hostProcessedMsgIds.size > 500) {
+        const arr = Array.from(hostProcessedMsgIds);
+        hostProcessedMsgIds = new Set(arr.slice(arr.length - 250));
+    }
+
+    return false;
 }
 
 function switchView(viewId) {
@@ -782,31 +867,14 @@ function handleMessage(d) {
     }
 
     if (d.t === "host_preparing") {
-        if (roomHostId && d.hostId !== roomHostId) return;
-
-        roomHostId = d.hostId;
-        roomHostName = cleanName(d.hostName) || "Host";
-
-        if (state === "init") {
-            mEl.innerText = `${roomHostName} が設定中です...`;
-        }
-
-        if (isHost && roomHostId !== uid) {
-            isHost = false;
-            showToast(`${roomHostName} さんが既にホストです`);
-            switchView("game-view");
-            safePublish({
-                t: "hello_req",
-                from: uid
-            });
-        }
-
+        handleHostPreparing(d);
         return;
     }
 
     if (d.t === "config_set") {
         if (!isHost) return;
         if (d.hostId !== uid) return;
+        if (rememberHostMsg(d.msgId)) return;
 
         config.mode = d.config?.mode === "turn" ? "turn" : "realtime";
         config.cdTime = normalizeCdTime(d.config?.cdTime);
@@ -815,26 +883,37 @@ function handleMessage(d) {
         state = "waiting";
         turn = 0;
         lastMoveAt = [0, 0, 0, 0];
+        countdownEndAt = 0;
 
         broadcastSnapshot(null);
         switchView("game-view");
         return;
     }
 
+    if (d.t === "start_req") {
+        if (!isHost) return;
+        if (rememberHostMsg(d.msgId)) return;
+        hostHandleStartReq(d);
+        return;
+    }
+
     if (d.t === "seat_req") {
         if (!isHost) return;
+        if (rememberHostMsg(d.msgId)) return;
         hostHandleSeatReq(d);
         return;
     }
 
     if (d.t === "move_req") {
         if (!isHost) return;
+        if (rememberHostMsg(d.msgId)) return;
         hostHandleMoveReq(d);
         return;
     }
 
     if (d.t === "reset_req") {
         if (!isHost) return;
+        if (rememberHostMsg(d.msgId)) return;
         hostHandleResetReq(d);
         return;
     }
@@ -860,37 +939,84 @@ function handleHostClaim(d) {
 
     if (!claimedHostId) return;
 
+    hostCandidateNameById[claimedHostId] = claimedHostName;
+
     if (!roomHostId) {
         roomHostId = claimedHostId;
         roomHostName = claimedHostName;
-
-        if (state === "init") {
-            mEl.innerText = `${roomHostName} が設定中です...`;
-        }
-
-        if (isHost && roomHostId !== uid) {
-            isHost = false;
-            showToast(`${roomHostName} さんが既にホストです`);
-            switchView("game-view");
-            safePublish({
-                t: "hello_req",
-                from: uid
-            });
-        }
-
+        resolveMyHostStatus();
         return;
     }
 
-    if (roomHostId !== claimedHostId) {
-        if (isHost && uid === roomHostId) {
-            broadcastHostPreparing();
-            broadcastSnapshot(null);
-        }
+    const winner = electHostId(roomHostId, claimedHostId);
 
+    if (winner !== roomHostId) {
+        roomHostId = winner;
+        roomHostName = hostCandidateNameById[winner] || roomHostName || "Host";
+        resolveMyHostStatus();
         return;
     }
 
-    roomHostName = claimedHostName;
+    if (roomHostId === claimedHostId) {
+        roomHostName = claimedHostName;
+    }
+
+    resolveMyHostStatus();
+}
+
+function handleHostPreparing(d) {
+    const incomingHostId = String(d.hostId || "");
+    const incomingHostName = cleanName(d.hostName) || "Host";
+
+    if (!incomingHostId) return;
+
+    hostCandidateNameById[incomingHostId] = incomingHostName;
+
+    if (!roomHostId) {
+        roomHostId = incomingHostId;
+        roomHostName = incomingHostName;
+        resolveMyHostStatus();
+    } else {
+        const winner = electHostId(roomHostId, incomingHostId);
+
+        if (winner !== roomHostId) {
+            roomHostId = winner;
+            roomHostName = hostCandidateNameById[winner] || incomingHostName;
+            resolveMyHostStatus();
+        } else if (roomHostId === incomingHostId) {
+            roomHostName = incomingHostName;
+        }
+    }
+
+    if (state === "init") {
+        mEl.innerText = `${roomHostName} が設定中です...`;
+    }
+}
+
+function electHostId(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    return String(a) < String(b) ? String(a) : String(b);
+}
+
+function resolveMyHostStatus() {
+    if (isHost && roomHostId !== uid) {
+        isHost = false;
+        showToast(`${roomHostName || "他のユーザー"} さんがホストです`);
+        switchView("game-view");
+        safePublish({
+            t: "hello_req",
+            from: uid
+        });
+        updateUI();
+        return;
+    }
+
+    if (isHost && roomHostId === uid) {
+        roomHostName = myName;
+        broadcastHostPreparing();
+        broadcastSnapshot(null);
+    }
 }
 
 function normalizeCdTime(v) {
@@ -927,6 +1053,7 @@ function handleBecomeHost() {
     isHost = true;
     roomHostId = uid;
     roomHostName = myName;
+    hostCandidateNameById[uid] = myName;
     topic = `qr/oth/${rId}/${rKey}`;
 
     document.getElementById("setup-host-label").innerText = `${myName} さんがホストです`;
@@ -1004,6 +1131,7 @@ function makeSnapshot(to) {
         seats,
         turn,
         lastMoveAt,
+        countdownEndAt,
         serverTime: Date.now()
     };
 }
@@ -1022,6 +1150,10 @@ function applySnapshot(d) {
     roomHostName = cleanName(d.hostName) || "Host";
     state = d.state || "init";
 
+    if (typeof d.serverTime === "number") {
+        timeOffsetFromHost = d.serverTime - Date.now();
+    }
+
     config = {
         mode: d.config?.mode === "turn" ? "turn" : "realtime",
         cdTime: normalizeCdTime(d.config?.cdTime)
@@ -1031,8 +1163,9 @@ function applySnapshot(d) {
     seats = Array.isArray(d.seats) ? d.seats : seats;
     turn = Number.isInteger(d.turn) ? d.turn : 0;
     lastMoveAt = Array.isArray(d.lastMoveAt) ? d.lastMoveAt : [0, 0, 0, 0];
+    countdownEndAt = typeof d.countdownEndAt === "number" ? d.countdownEndAt : 0;
 
-    if (state === "waiting" || state === "playing" || state === "finished") {
+    if (state === "waiting" || state === "countdown" || state === "playing" || state === "finished") {
         if (!bEl.children.length) {
             initB();
         } else {
@@ -1043,6 +1176,7 @@ function applySnapshot(d) {
         updateUI();
         updateValidMoves();
         syncCooldownUI();
+        updateCountdownUI();
     }
 }
 
@@ -1080,8 +1214,10 @@ function initGameState() {
     seats = [null, null, null, null];
     turn = 0;
     lastMoveAt = [0, 0, 0, 0];
+    countdownEndAt = 0;
     myCooldown = false;
     mdEl.style.display = "none";
+    hideCountdownOverlay();
 }
 
 function initB() {
@@ -1110,9 +1246,67 @@ function initB() {
     updateValidMoves();
 }
 
+function hostStartCountdown() {
+    safePublish({
+        t: "start_req",
+        from: uid
+    });
+}
+
+function hostHandleStartReq(d) {
+    if (!isHost || roomHostId !== uid) return;
+    if (d.from !== uid) return;
+
+    if (state !== "waiting") {
+        return;
+    }
+
+    const seatedCount = seats.filter(s => s !== null).length;
+
+    if (seatedCount === 0) {
+        showToast("最低1人は着席してください");
+        return;
+    }
+
+    state = "countdown";
+    countdownEndAt = Date.now() + COUNTDOWN_MS;
+    lastMoveAt = [0, 0, 0, 0];
+
+    broadcastSnapshot(null);
+    scheduleHostGameStart();
+}
+
+function scheduleHostGameStart() {
+    if (!isHost || roomHostId !== uid) return;
+
+    if (hostFinalStartTimer) {
+        clearTimeout(hostFinalStartTimer);
+    }
+
+    const remain = Math.max(0, countdownEndAt - Date.now());
+
+    hostFinalStartTimer = setTimeout(() => {
+        if (!isHost || roomHostId !== uid) return;
+        if (state !== "countdown") return;
+
+        state = "playing";
+        turn = findFirstMovableTurn();
+        countdownEndAt = 0;
+        lastMoveAt = [0, 0, 0, 0];
+
+        broadcastSnapshot(null);
+    }, remain + 80);
+}
+
 function takeSeat(idx) {
-    if (state !== "waiting" && state !== "playing") {
-        showToast("まだ着席できません");
+    if (state !== "waiting") {
+        if (state === "countdown") {
+            showToast("カウントダウン中です");
+        } else if (state === "playing") {
+            showToast("ゲーム開始後は着席できません");
+        } else {
+            showToast("まだ着席できません");
+        }
         return;
     }
 
@@ -1143,7 +1337,7 @@ function takeSeat(idx) {
 }
 
 function hostHandleSeatReq(d) {
-    if (state !== "waiting" && state !== "playing") return;
+    if (state !== "waiting") return;
 
     const idx = Number(d.idx);
     const id = String(d.from || "");
@@ -1160,18 +1354,22 @@ function hostHandleSeatReq(d) {
         name
     };
 
-    if (state === "waiting" && seats.every(s => s !== null)) {
-        state = "playing";
-        turn = findFirstMovableTurn();
-    }
-
     broadcastSnapshot(null);
 }
 
 function findFirstMovableTurn() {
     for (let i = 0; i < 4; i++) {
+        if (!seats[i]) continue;
+
         const col = seatColor(i);
-        if (canMove(col)) return i;
+
+        if (canMove(col)) {
+            return i;
+        }
+    }
+
+    for (let i = 0; i < 4; i++) {
+        if (seats[i]) return i;
     }
 
     return 0;
@@ -1239,9 +1437,26 @@ function canMove(col) {
     return false;
 }
 
+function canAnySeatedPlayerMove() {
+    for (let i = 0; i < 4; i++) {
+        if (!seats[i]) continue;
+
+        const col = seatColor(i);
+
+        if (canMove(col)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function calculateNextTurn(currentIdx) {
     for (let i = 1; i <= 4; i++) {
         const next = (currentIdx + i) % 4;
+
+        if (!seats[next]) continue;
+
         const col = seatColor(next);
 
         if (canMove(col)) {
@@ -1278,7 +1493,12 @@ function updateValidMoves() {
 }
 
 function clickCell(r, c) {
-    if (state !== "playing") return;
+    if (state !== "playing") {
+        if (state === "countdown") {
+            showToast("開始までお待ちください");
+        }
+        return;
+    }
 
     const myIdx = seats.findIndex(s => s && s.id === uid);
 
@@ -1374,7 +1594,7 @@ function checkEndHost() {
         else if (v === 2) w++;
     });
 
-    if (empty === 0 || (!canMove(1) && !canMove(2))) {
+    if (empty === 0 || !canAnySeatedPlayerMove()) {
         state = "finished";
     }
 }
@@ -1430,7 +1650,7 @@ function syncCooldownUI() {
         return;
     }
 
-    const now = Date.now();
+    const now = hostNow();
     const myIdx = seats.findIndex(s => s && s.id === uid);
     let stillCooling = false;
 
@@ -1449,6 +1669,62 @@ function syncCooldownUI() {
 
     myCooldown = stillCooling;
     bEl.classList.toggle("cooldown", myCooldown);
+}
+
+function hostNow() {
+    return Date.now() + timeOffsetFromHost;
+}
+
+function updateCountdownUI() {
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+    }
+
+    if (state !== "countdown") {
+        hideCountdownOverlay();
+        return;
+    }
+
+    showCountdownOverlay();
+
+    const update = () => {
+        const remain = Math.max(0, countdownEndAt - hostNow());
+        const sec = Math.ceil(remain / 1000);
+
+        countdownNumberEl.innerText = String(Math.max(1, sec));
+        countdownLabelEl.innerText = "Starting...";
+
+        if (remain <= 0) {
+            countdownNumberEl.innerText = "GO";
+            countdownLabelEl.innerText = "";
+        }
+    };
+
+    update();
+
+    countdownInterval = setInterval(() => {
+        update();
+
+        if (state !== "countdown") {
+            clearInterval(countdownInterval);
+            countdownInterval = null;
+            hideCountdownOverlay();
+        }
+    }, 100);
+}
+
+function showCountdownOverlay() {
+    countdownOverlayEl.style.display = "flex";
+}
+
+function hideCountdownOverlay() {
+    countdownOverlayEl.style.display = "none";
+
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+    }
 }
 
 function drawStone(r, c, col) {
@@ -1546,18 +1822,47 @@ function updateUI() {
             }
         }
 
+        btn.disabled = state !== "waiting" && !sd;
+
         const cdBar = btn.querySelector(".cd-bar");
         if (cdBar) {
             cdBar.style.display = config.mode === "realtime" ? "block" : "none";
         }
     });
 
+    const hostControls = document.getElementById("host-controls");
+    const hostStartBtn = document.getElementById("host-start-btn");
+
+    if (isHost && roomHostId === uid && state === "waiting") {
+        hostControls.style.display = "block";
+
+        const seatedCount = seats.filter(s => s !== null).length;
+        hostStartBtn.disabled = seatedCount === 0;
+        hostStartBtn.innerText = seatedCount === 0
+            ? "1人以上着席すると開始できます"
+            : `ゲーム開始 (${seatedCount}人)`;
+    } else {
+        hostControls.style.display = "none";
+    }
+
     if (state === "waiting") {
+        const seatedCount = seats.filter(s => s !== null).length;
         const emptyCount = seats.filter(s => s === null).length;
-        mEl.innerText = emptyCount > 0
-            ? `あと ${emptyCount} 人の参加を待っています`
-            : "全員揃いました";
+
+        if (isHost && roomHostId === uid) {
+            mEl.innerText = seatedCount > 0
+                ? "人数が揃っていなくても開始できます"
+                : "参加者の着席を待っています";
+        } else {
+            mEl.innerText = emptyCount > 0
+                ? `あと ${emptyCount} 席あります`
+                : "満席です";
+        }
+
         mEl.style.color = "var(--text)";
+    } else if (state === "countdown") {
+        mEl.innerText = "まもなく開始します";
+        mEl.style.color = "var(--accent)";
     } else if (state === "playing") {
         if (config.mode === "turn") {
             const turnName = seats[turn]?.name || "次のプレイヤー";
@@ -1609,9 +1914,10 @@ function hostHandleResetReq(d) {
     board[3][4] = 1;
     board[4][3] = 1;
 
-    state = seats.every(s => s !== null) ? "playing" : "waiting";
-    turn = findFirstMovableTurn();
+    state = "waiting";
+    turn = 0;
     lastMoveAt = [0, 0, 0, 0];
+    countdownEndAt = 0;
 
     broadcastSnapshot(null);
 }
